@@ -39,3 +39,12 @@
 
 # debug information files
 *.dwo
+
+/build
+*.uf2
+*.elf
+*.map
+*.bin
+*.o
+*.obj
+*.log
