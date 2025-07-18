@@ -1,30 +1,56 @@
 #include "pico/stdlib.h"
-#include "ESCController.h"
-#include "PWMESCController.h"
+#include "UltrasonicSensor.h"
+#include <stdio.h>
+#include <optional>
 
-//#include "MotorController.h"
+// Pointer to our optional ultrasonic sensor object
+UltrasonicSensor* ultrasonic = nullptr;
 
 int main() {
-    // Enable USB serial output (for debugging)
-    stdio_init_all(); 
+    // Initialize USB serial output (for printf)
+    stdio_init_all();
+    sleep_ms(2000);  // Give USB serial time to connect
 
-    // Create an instance of PWMESCController with GPIOs 2 - 5
-    // These pins should connect to the ESC signal wires
-    PWMESCController esc({2, 3, 4, 5})
+    printf("Starting Drone System...\n");
 
-    // Initialise all motors: configure PWM and arm ESCs
-    esc.init();
+    // Allocate and initialize the ultrasonic sensor (GPIO 10 = Trig, GPIO 11 = Echo)
+    auto* us = new UltrasonicSensor(10, 11);
+    us->init();
 
-    // Loop:ramp up and down motor 0 every 2 seconds 
-    while (true)
-    {
-        // Set motor 0 to throttle to 50% 
-        esc.setThrottle(0, 0.5);
-        sleep_ms(2000);
+    // Try one test read to see if the sensor is connected
+    auto initialReading = us->readDistanceCM();
 
-        // Stop motor 0
-        esc,setThrottle(0, 0.0);
-        sleep_ms(2000);
+    if (initialReading.has_value()) {
+        // If sensor responded, keep it
+        ultrasonic = us;
+        printf("Ultrasonic sensor detected. Initial height = %.2f cm\n", *initialReading);
+    } else {
+        // If no response, discard sensor and continue without it
+        delete us;
+        ultrasonic = nullptr;
+        printf("Ultrasonic sensor NOT detected. Running without it.\n");
     }
+
+    // Main control loop (replace with your flight logic later)
+    while (true) {
+        // Only try to read from ultrasonic if it's connected
+        if (ultrasonic) {
+            auto distance = ultrasonic->readDistanceCM();
+
+            if (distance.has_value()) {
+                // Valid reading
+                printf("Altitude: %.2f cm\n", *distance);
+            } else {
+                // Sensor was removed or failed
+                printf("Ultrasonic sensor failed. Disabling further use.\n");
+                delete ultrasonic;
+                ultrasonic = nullptr;
+            }
+        }
+
+        // Delay to limit loop frequency (adjust as needed)
+        sleep_ms(200);
+    }
+
     return 0;
-}    
+}
