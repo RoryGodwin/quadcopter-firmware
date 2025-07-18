@@ -1,55 +1,121 @@
 #include "pico/stdlib.h"
+#include "hardware/adc.h"
+
 #include "UltrasonicSensor.h"
+#include "CommandReceiver.h"
+#include "EscController.h"
+#include "GPSModule.h"
+#include "IMUSensor.h"
+#include "SensorFusion.h"
+#include "FlightController.h"
+#include "TelemetryManager.h"
+
 #include <stdio.h>
 #include <optional>
 
-// Pointer to our optional ultrasonic sensor object
+// === Global Components ===
 UltrasonicSensor* ultrasonic = nullptr;
+CommandReceiver commandReceiver;
+GPSModule gps;
+IMUSensor imu;
+SensorFusion sensorFusion;
+FlightController flightController;
+TelemetryManager telemetry(&sensorFusion);
+EscController escController;
 
-int main() {
-    // Initialize USB serial output (for printf)
+// === Setup Function ===
+void setup() {
     stdio_init_all();
-    sleep_ms(2000);  // Give USB serial time to connect
+    sleep_ms(2000);
+    printf("=== Drone System Booting ===\n");
 
-    printf("Starting Drone System...\n");
+    // --- ADC Setup for Battery Monitoring ---
+    adc_init();
+    adc_gpio_init(26);     // GPIO 26 = ADC0
+    adc_select_input(0);   // Select ADC0
 
-    // Allocate and initialize the ultrasonic sensor (GPIO 10 = Trig, GPIO 11 = Echo)
-    auto* us = new UltrasonicSensor(10, 11);
+    // --- Optional Ultrasonic ---
+    UltrasonicSensor* us = new UltrasonicSensor(10, 11);
     us->init();
-
-    // Try one test read to see if the sensor is connected
-    auto initialReading = us->readDistanceCM();
-
-    if (initialReading.has_value()) {
-        // If sensor responded, keep it
+    auto test = us->readDistanceCM();
+    if (test.has_value()) {
         ultrasonic = us;
-        printf("Ultrasonic sensor detected. Initial height = %.2f cm\n", *initialReading);
+        printf("[INFO] Ultrasonic sensor detected: %.2f cm\n", *test);
     } else {
-        // If no response, discard sensor and continue without it
         delete us;
         ultrasonic = nullptr;
-        printf("Ultrasonic sensor NOT detected. Running without it.\n");
+        printf("[INFO] No ultrasonic sensor found.\n");
     }
 
-    // Main control loop (replace with your flight logic later)
-    while (true) {
-        // Only try to read from ultrasonic if it's connected
-        if (ultrasonic) {
-            auto distance = ultrasonic->readDistanceCM();
+    // --- ESC Setup ---
+    escController.attachMotor(0, 2);
+    escController.attachMotor(1, 3);
+    escController.attachMotor(2, 4);
+    escController.attachMotor(3, 5);
+    escController.armAll();
+    printf("[INFO] ESCs armed.\n");
 
-            if (distance.has_value()) {
-                // Valid reading
-                printf("Altitude: %.2f cm\n", *distance);
-            } else {
-                // Sensor was removed or failed
-                printf("Ultrasonic sensor failed. Disabling further use.\n");
+    // --- IMU ---
+    if (!imu.init()) {
+        printf("[ERROR] IMU init failed.\n");
+        while (true) sleep_ms(1000);
+    }
+    printf("[INFO] IMU ready.\n");
+
+    // --- GPS ---
+    if (!gps.init()) {
+        printf("[WARN] GPS not found. Using IMU only.\n");
+    } else {
+        printf("[INFO] GPS detected.\n");
+    }
+
+    // --- Flight Controller ---
+    flightController.setSensorFusion(&sensorFusion);
+    flightController.setESCController(&escController);
+}
+
+// === Main Loop ===
+int main() {
+    setup();
+
+    while (true) {
+        // --- Read Commands ---
+        if (stdin_is_readable()) {
+            char c = getchar();
+            commandReceiver.inputChar(c);
+        }
+
+        // --- IMU and GPS ---
+        imu.update();
+        if (gps.isAvailable()) gps.update();
+
+        // --- Sensor Fusion ---
+        sensorFusion.setIMUData(imu.getOrientation());
+        if (gps.isAvailable()) sensorFusion.setGPSData(gps.getLocation());
+        sensorFusion.update();
+
+        // --- Ultrasonic ---
+        if (ultrasonic) {
+            auto dist = ultrasonic->readDistanceCM();
+            if (!dist.has_value()) {
+                printf("[WARN] Disabling ultrasonic.\n");
                 delete ultrasonic;
                 ultrasonic = nullptr;
             }
         }
 
-        // Delay to limit loop frequency (adjust as needed)
-        sleep_ms(200);
+        // --- Battery ADC ---
+        uint16_t raw = adc_read();
+        telemetry.setBatteryRawADC(raw);
+
+        // --- Telemetry ---
+        telemetry.update();
+        telemetry.send();
+
+        // --- Control ---
+        flightController.update();
+
+        sleep_ms(50);
     }
 
     return 0;
